@@ -1,9 +1,11 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import pandas as pd
 from db import supabase
 import io
 
 app = Flask(__name__)
+CORS(app)  # 👈 ВАЖНО для фронта
 
 
 def calculate_metrics(df):
