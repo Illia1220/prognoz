@@ -79,10 +79,10 @@ def upload_csv():
 @app.route("/forecast", methods=["GET"])
 def forecast():
     response = supabase.table("ads_data").select("*").execute()
-    data = response.data
+    data = response.data or []
 
-    if not data:
-        return {"error": "No data"}
+    if len(data) == 0:
+        return jsonify({"error": "No data"})
 
     df = pd.DataFrame(data)
     df["date"] = pd.to_datetime(df["date"])
@@ -90,41 +90,46 @@ def forecast():
     df = calculate_metrics(df)
 
     # -------------------------
-    # MONTHLY AGGREGATION
+    # MONTHLY
     # -------------------------
-    monthly = df.groupby(df["date"].dt.to_period("M")).agg({
+    monthly = df.groupby(df["date"].dt.to_period("M").astype(str)).agg({
         "spend": "sum",
         "revenue": "sum",
         "clicks": "sum",
         "impressions": "sum"
     }).reset_index()
 
-    monthly["roi"] = monthly["revenue"] / monthly["spend"].replace(0, 1)
+    monthly.rename(columns={"date": "month"}, inplace=True)
+
+    monthly["roi"] = (monthly["revenue"] / monthly["spend"].replace(0, 1)).fillna(0)
 
     # -------------------------
     # TREND
     # -------------------------
-    roi_trend = (
-        monthly["roi"].iloc[-1] - monthly["roi"].iloc[0]
-    ) / max(len(monthly), 1)
+    if len(monthly) > 1:
+        roi_trend = (
+            monthly["roi"].iloc[-1] - monthly["roi"].iloc[0]
+        ) / len(monthly)
+    else:
+        roi_trend = 0
 
-    next_month_roi = monthly["roi"].mean() + roi_trend
+    next_month_roi = float(monthly["roi"].mean() + roi_trend)
 
     # -------------------------
-    # RECOMMENDED SPEND
+    # SPEND
     # -------------------------
     avg_roi = monthly["roi"].mean()
 
-    recommended_spend = (
+    recommended_spend = float(
         monthly["spend"].mean() * (avg_roi / max(next_month_roi, 0.1))
     )
 
-    return {
+    return jsonify({
         "monthly": monthly.to_dict(orient="records"),
-        "next_month_roi": float(next_month_roi),
+        "next_month_roi": next_month_roi,
         "roi_trend": float(roi_trend),
-        "recommended_spend": float(recommended_spend)
-    }
+        "recommended_spend": recommended_spend
+    })
 
 
 # -----------------------------
