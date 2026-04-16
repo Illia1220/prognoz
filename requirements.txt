@@ -1,4 +1,6 @@
 flask
 flask-cors
 pandas
+numpy
 supabase
+gunicorn
