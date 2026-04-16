@@ -5,11 +5,13 @@ from db import supabase
 import io
 
 app = Flask(__name__)
-CORS(app)  # 👈 ВАЖНО для фронта
+CORS(app)
 
 
+# -----------------------------
+# METRICS
+# -----------------------------
 def calculate_metrics(df):
-    # защита от нулей и ошибок
     df = df.fillna(0)
 
     df["ctr"] = df["clicks"] / df["impressions"].replace(0, 1)
@@ -20,11 +22,17 @@ def calculate_metrics(df):
     return df
 
 
+# -----------------------------
+# HOME
+# -----------------------------
 @app.route("/")
 def home():
     return "CSV ETL Service is running 🚀"
 
 
+# -----------------------------
+# UPLOAD CSV
+# -----------------------------
 @app.route("/upload", methods=["POST"])
 def upload_csv():
     try:
@@ -47,7 +55,7 @@ def upload_csv():
 
         data = df.to_dict(orient="records")
 
-        response = supabase.table("ads_data").insert(data).execute()
+        supabase.table("ads_data").insert(data).execute()
 
         print("✅ Data inserted to Supabase")
 
@@ -65,5 +73,73 @@ def upload_csv():
         }), 500
 
 
+# -----------------------------
+# FORECAST ENDPOINT
+# -----------------------------
+@app.route("/forecast", methods=["GET"])
+def forecast():
+    try:
+        # берем данные из Supabase
+        response = supabase.table("ads_data").select("*").execute()
+
+        data = response.data
+
+        if not data:
+            return jsonify({"error": "No data"}), 400
+
+        df = pd.DataFrame(data)
+        df = calculate_metrics(df)
+
+        # -------------------------
+        # GLOBAL FORECAST
+        # -------------------------
+        avg_roi = df["roi"].mean()
+        avg_spend = df["spend"].mean()
+        avg_revenue = df["revenue"].mean()
+
+        trend_roi = (df["roi"].iloc[-1] - df["roi"].iloc[0]) / max(len(df), 1)
+
+        forecast_7d_roi = avg_roi + trend_roi * 7
+        forecast_7d_revenue = avg_revenue * 7
+        forecast_7d_spend = avg_spend * 7
+
+        # -------------------------
+        # BY CAMPAIGN FORECAST
+        # -------------------------
+        campaign_forecast = (
+            df.groupby("campaign")["roi"]
+            .mean()
+            .reset_index()
+            .to_dict(orient="records")
+        )
+
+        return jsonify({
+            "avg_roi": float(avg_roi),
+            "avg_spend": float(avg_spend),
+            "avg_revenue": float(avg_revenue),
+
+            "trend_roi": float(trend_roi),
+
+            "forecast_7d": {
+                "roi": float(forecast_7d_roi),
+                "spend": float(forecast_7d_spend),
+                "revenue": float(forecast_7d_revenue),
+            },
+
+            "campaign_forecast": campaign_forecast
+        })
+
+    except Exception as e:
+        print("❌ Forecast error:", str(e))
+
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
+# -----------------------------
+# RUN
+# -----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
