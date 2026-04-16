@@ -3,6 +3,7 @@ from flask_cors import CORS
 import pandas as pd
 from db import supabase
 import io
+import numpy as np
 
 app = Flask(__name__)
 CORS(app)
@@ -19,15 +20,9 @@ def calculate_metrics(df):
     df["cpa"] = df["spend"] / df["conversions"].replace(0, 1)
     df["roi"] = df["revenue"] / df["spend"].replace(0, 1)
 
+    df = df.replace([np.inf, -np.inf], 0)
+
     return df
-
-
-# -----------------------------
-# HOME
-# -----------------------------
-@app.route("/")
-def home():
-    return "CSV ETL Service is running 🚀"
 
 
 # -----------------------------
@@ -36,8 +31,6 @@ def home():
 @app.route("/upload", methods=["POST"])
 def upload_csv():
     try:
-        print("📥 Upload request received")
-
         if "file" not in request.files:
             return jsonify({"error": "No file provided"}), 400
 
@@ -49,15 +42,11 @@ def upload_csv():
         content = file.read().decode("utf-8")
         df = pd.read_csv(io.StringIO(content))
 
-        print(f"📊 Rows received: {len(df)}")
-
         df = calculate_metrics(df)
 
         data = df.to_dict(orient="records")
 
         supabase.table("ads_data").insert(data).execute()
-
-        print("✅ Data inserted to Supabase")
 
         return jsonify({
             "status": "success",
@@ -65,8 +54,6 @@ def upload_csv():
         })
 
     except Exception as e:
-        print("❌ Error:", str(e))
-
         return jsonify({
             "status": "error",
             "message": str(e)
@@ -74,62 +61,82 @@ def upload_csv():
 
 
 # -----------------------------
-# FORECAST ENDPOINT
+# FORECAST (FIXED)
 # -----------------------------
 @app.route("/forecast", methods=["GET"])
 def forecast():
-    response = supabase.table("ads_data").select("*").execute()
-    data = response.data or []
+    try:
+        response = supabase.table("ads_data").select("*").execute()
+        data = response.data or []
 
-    if len(data) == 0:
-        return jsonify({"error": "No data"})
+        if len(data) == 0:
+            return jsonify({
+                "next_month_roi": 0,
+                "roi_trend": 0,
+                "recommended_spend": 0,
+                "monthly": []
+            })
 
-    df = pd.DataFrame(data)
-    df["date"] = pd.to_datetime(df["date"])
+        df = pd.DataFrame(data)
 
-    df = calculate_metrics(df)
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"])
 
-    # -------------------------
-    # MONTHLY
-    # -------------------------
-    monthly = df.groupby(df["date"].dt.to_period("M").astype(str)).agg({
-        "spend": "sum",
-        "revenue": "sum",
-        "clicks": "sum",
-        "impressions": "sum"
-    }).reset_index()
+        df = calculate_metrics(df)
 
-    monthly.rename(columns={"date": "month"}, inplace=True)
+        # -------------------------
+        # MONTHLY AGGREGATION
+        # -------------------------
+        monthly = df.groupby(df["date"].dt.to_period("M").astype(str)).agg({
+            "spend": "sum",
+            "revenue": "sum",
+            "clicks": "sum",
+            "impressions": "sum"
+        }).reset_index()
 
-    monthly["roi"] = (monthly["revenue"] / monthly["spend"].replace(0, 1)).fillna(0)
+        monthly.rename(columns={"date": "month"}, inplace=True)
 
-    # -------------------------
-    # TREND
-    # -------------------------
-    if len(monthly) > 1:
-        roi_trend = (
-            monthly["roi"].iloc[-1] - monthly["roi"].iloc[0]
-        ) / len(monthly)
-    else:
-        roi_trend = 0
+        monthly["roi"] = (
+            monthly["revenue"] / monthly["spend"].replace(0, 1)
+        ).fillna(0)
 
-    next_month_roi = float(monthly["roi"].mean() + roi_trend)
+        monthly = monthly.replace([np.inf, -np.inf], 0)
 
-    # -------------------------
-    # SPEND
-    # -------------------------
-    avg_roi = monthly["roi"].mean()
+        # -------------------------
+        # TREND
+        # -------------------------
+        if len(monthly) > 1:
+            roi_trend = (
+                monthly["roi"].iloc[-1] - monthly["roi"].iloc[0]
+            ) / len(monthly)
+        else:
+            roi_trend = 0
 
-    recommended_spend = float(
-        monthly["spend"].mean() * (avg_roi / max(next_month_roi, 0.1))
-    )
+        avg_roi = monthly["roi"].mean()
+        next_month_roi = avg_roi + roi_trend
 
-    return jsonify({
-        "monthly": monthly.to_dict(orient="records"),
-        "next_month_roi": next_month_roi,
-        "roi_trend": float(roi_trend),
-        "recommended_spend": recommended_spend
-    })
+        # -------------------------
+        # RECOMMENDED SPEND
+        # -------------------------
+        avg_spend = monthly["spend"].mean()
+
+        if next_month_roi <= 0:
+            recommended_spend = avg_spend
+        else:
+            recommended_spend = avg_spend * (avg_roi / next_month_roi)
+
+        return jsonify({
+            "monthly": monthly.to_dict(orient="records"),
+            "next_month_roi": float(next_month_roi),
+            "roi_trend": float(roi_trend),
+            "recommended_spend": float(recommended_spend)
+        })
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 
 # -----------------------------
