@@ -4,10 +4,10 @@ import pandas as pd
 from db import supabase
 import io
 import numpy as np
+import hashlib
 
 app = Flask(__name__)
 CORS(app)
-
 
 # -----------------------------
 # METRICS
@@ -15,18 +15,19 @@ CORS(app)
 def calculate_metrics(df):
     df = df.fillna(0)
 
-    df["ctr"] = df["clicks"] / df["impressions"].replace(0, 1)
-    df["cpm"] = df["spend"] / df["impressions"].replace(0, 1) * 1000
-    df["cpa"] = df["spend"] / df["conversions"].replace(0, 1)
-    df["roi"] = df["revenue"] / df["spend"].replace(0, 1)
+    df["ctr"] = df["clicks"] / df["impressions"].replace(0, np.nan)
+    df["cpm"] = df["spend"] / df["impressions"].replace(0, np.nan) * 1000
+    df["cpa"] = df["spend"] / df["conversions"].replace(0, np.nan)
+    df["roi"] = df["revenue"] / df["spend"].replace(0, np.nan)
 
     df = df.replace([np.inf, -np.inf], 0)
+    df = df.fillna(0)
 
     return df
 
 
 # -----------------------------
-# UPLOAD CSV
+# UPLOAD CSV (FIXED)
 # -----------------------------
 @app.route("/upload", methods=["POST"])
 def upload_csv():
@@ -40,9 +41,43 @@ def upload_csv():
             return jsonify({"error": "Empty file"}), 400
 
         content = file.read().decode("utf-8")
+
+        # 🔥 create upload hash (prevents duplicates)
+        upload_hash = hashlib.md5(content.encode()).hexdigest()
+
+        # optional: check if already uploaded
+        existing = supabase.table("ads_uploads") \
+            .select("*") \
+            .eq("upload_hash", upload_hash) \
+            .execute()
+
+        if existing.data:
+            return jsonify({
+                "status": "skipped",
+                "message": "File already uploaded"
+            })
+
         df = pd.read_csv(io.StringIO(content))
 
+        # remove empty rows
+        df = df.dropna(how="all")
+
+        # remove duplicates inside file
+        df = df.drop_duplicates()
+
+        # ensure required columns exist safety
+        required_cols = ["spend", "clicks", "impressions", "revenue"]
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = 0
+
         df = calculate_metrics(df)
+
+        # save upload log
+        supabase.table("ads_uploads").insert({
+            "upload_hash": upload_hash,
+            "filename": file.filename
+        }).execute()
 
         data = df.to_dict(orient="records")
 
@@ -50,7 +85,7 @@ def upload_csv():
 
         return jsonify({
             "status": "success",
-            "rows_inserted": len(df)
+            "rows_inserted": len(data)
         })
 
     except Exception as e:
@@ -61,7 +96,7 @@ def upload_csv():
 
 
 # -----------------------------
-# FORECAST (FIXED)
+# FORECAST
 # -----------------------------
 @app.route("/forecast", methods=["GET"])
 def forecast():
@@ -84,9 +119,6 @@ def forecast():
 
         df = calculate_metrics(df)
 
-        # -------------------------
-        # MONTHLY AGGREGATION
-        # -------------------------
         monthly = df.groupby(df["date"].dt.to_period("M").astype(str)).agg({
             "spend": "sum",
             "revenue": "sum",
@@ -97,14 +129,11 @@ def forecast():
         monthly.rename(columns={"date": "month"}, inplace=True)
 
         monthly["roi"] = (
-            monthly["revenue"] / monthly["spend"].replace(0, 1)
+            monthly["revenue"] / monthly["spend"].replace(0, np.nan)
         ).fillna(0)
 
         monthly = monthly.replace([np.inf, -np.inf], 0)
 
-        # -------------------------
-        # TREND
-        # -------------------------
         if len(monthly) > 1:
             roi_trend = (
                 monthly["roi"].iloc[-1] - monthly["roi"].iloc[0]
@@ -115,9 +144,6 @@ def forecast():
         avg_roi = monthly["roi"].mean()
         next_month_roi = avg_roi + roi_trend
 
-        # -------------------------
-        # RECOMMENDED SPEND
-        # -------------------------
         avg_spend = monthly["spend"].mean()
 
         if next_month_roi <= 0:
