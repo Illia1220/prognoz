@@ -78,64 +78,53 @@ def upload_csv():
 # -----------------------------
 @app.route("/forecast", methods=["GET"])
 def forecast():
-    try:
-        # берем данные из Supabase
-        response = supabase.table("ads_data").select("*").execute()
+    response = supabase.table("ads_data").select("*").execute()
+    data = response.data
 
-        data = response.data
+    if not data:
+        return {"error": "No data"}
 
-        if not data:
-            return jsonify({"error": "No data"}), 400
+    df = pd.DataFrame(data)
+    df["date"] = pd.to_datetime(df["date"])
 
-        df = pd.DataFrame(data)
-        df = calculate_metrics(df)
+    df = calculate_metrics(df)
 
-        # -------------------------
-        # GLOBAL FORECAST
-        # -------------------------
-        avg_roi = df["roi"].mean()
-        avg_spend = df["spend"].mean()
-        avg_revenue = df["revenue"].mean()
+    # -------------------------
+    # MONTHLY AGGREGATION
+    # -------------------------
+    monthly = df.groupby(df["date"].dt.to_period("M")).agg({
+        "spend": "sum",
+        "revenue": "sum",
+        "clicks": "sum",
+        "impressions": "sum"
+    }).reset_index()
 
-        trend_roi = (df["roi"].iloc[-1] - df["roi"].iloc[0]) / max(len(df), 1)
+    monthly["roi"] = monthly["revenue"] / monthly["spend"].replace(0, 1)
 
-        forecast_7d_roi = avg_roi + trend_roi * 7
-        forecast_7d_revenue = avg_revenue * 7
-        forecast_7d_spend = avg_spend * 7
+    # -------------------------
+    # TREND
+    # -------------------------
+    roi_trend = (
+        monthly["roi"].iloc[-1] - monthly["roi"].iloc[0]
+    ) / max(len(monthly), 1)
 
-        # -------------------------
-        # BY CAMPAIGN FORECAST
-        # -------------------------
-        campaign_forecast = (
-            df.groupby("campaign")["roi"]
-            .mean()
-            .reset_index()
-            .to_dict(orient="records")
-        )
+    next_month_roi = monthly["roi"].mean() + roi_trend
 
-        return jsonify({
-            "avg_roi": float(avg_roi),
-            "avg_spend": float(avg_spend),
-            "avg_revenue": float(avg_revenue),
+    # -------------------------
+    # RECOMMENDED SPEND
+    # -------------------------
+    avg_roi = monthly["roi"].mean()
 
-            "trend_roi": float(trend_roi),
+    recommended_spend = (
+        monthly["spend"].mean() * (avg_roi / max(next_month_roi, 0.1))
+    )
 
-            "forecast_7d": {
-                "roi": float(forecast_7d_roi),
-                "spend": float(forecast_7d_spend),
-                "revenue": float(forecast_7d_revenue),
-            },
-
-            "campaign_forecast": campaign_forecast
-        })
-
-    except Exception as e:
-        print("❌ Forecast error:", str(e))
-
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+    return {
+        "monthly": monthly.to_dict(orient="records"),
+        "next_month_roi": float(next_month_roi),
+        "roi_trend": float(roi_trend),
+        "recommended_spend": float(recommended_spend)
+    }
 
 
 # -----------------------------
