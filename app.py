@@ -4,6 +4,7 @@ import pandas as pd
 from db import supabase
 import io
 import numpy as np
+import json
 
 app = Flask(__name__)
 CORS(app)
@@ -27,7 +28,7 @@ def calculate_metrics(df):
 
 
 # -----------------------------
-# UPLOAD CSV (FIXED)
+# UPLOAD CSV (STABLE VERSION)
 # -----------------------------
 @app.route("/upload", methods=["POST"])
 def upload_csv():
@@ -43,63 +44,78 @@ def upload_csv():
         content = file.read().decode("utf-8")
         df = pd.read_csv(io.StringIO(content))
 
+        print("RAW ROWS:", len(df))
+
         # -----------------------------
-        # CLEAN
+        # CLEAN DATA
         # -----------------------------
+
         df = df.dropna(how="all")
 
-        df = df.replace({np.nan: None})
-
+        # numeric safety
         numeric_cols = ["impressions", "clicks", "spend", "conversions", "revenue"]
 
         for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-        # DATE FIX (IMPORTANT)
+        # date fix (IMPORTANT)
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
+        df["date"] = df["date"].dt.strftime("%Y-%m-%d")
 
-        df["date"] = df["date"].dt.date
-
+        # remove duplicates
         df = df.drop_duplicates()
 
+        # metrics
         df = calculate_metrics(df)
 
+        # final cleanup
         df = df.replace({np.nan: None})
 
-        data = df.to_dict(orient="records")
+        # 🔥 CRITICAL FIX: make JSON-safe Python objects
+        data = json.loads(df.to_json(orient="records"))
 
         print("UPLOAD ROWS:", len(data))
+        print("SAMPLE:", data[0])
 
         # -----------------------------
-        # SAFE INSERT (NO NESTED TRY)
+        # SUPABASE INSERT
         # -----------------------------
-        res = supabase.table("ads_data").insert(data).execute()
+        try:
+            res = supabase.table("ads_data").insert(data).execute()
 
-        print("SUPABASE RESPONSE:", res)
+            print("SUPABASE RESPONSE:", res)
 
-        if hasattr(res, "error") and res.error:
+            if hasattr(res, "error") and res.error:
+                print("SUPABASE ERROR:", res.error)
+                return jsonify({
+                    "status": "error",
+                    "message": str(res.error)
+                }), 500
+
+            return jsonify({
+                "status": "success",
+                "rows_inserted": len(data)
+            })
+
+        except Exception as e:
+            print("SUPABASE INSERT ERROR:", repr(e))
             return jsonify({
                 "status": "error",
-                "message": str(res.error)
+                "message": repr(e)
             }), 500
 
-        return jsonify({
-            "status": "success",
-            "rows_inserted": len(data)
-        })
 
     except Exception as e:
-        print("UPLOAD ERROR:", str(e))
+        print("UPLOAD ERROR:", repr(e))
         return jsonify({
             "status": "error",
-            "message": str(e)
+            "message": repr(e)
         }), 500
 
 
 # -----------------------------
-# FORECAST
+# FORECAST (FIXED)
 # -----------------------------
 @app.route("/forecast", methods=["GET"])
 def forecast():
@@ -117,7 +133,7 @@ def forecast():
 
         df = pd.DataFrame(data)
 
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
 
         df = calculate_metrics(df)
@@ -128,8 +144,6 @@ def forecast():
             "clicks": "sum",
             "impressions": "sum"
         }).reset_index()
-
-        monthly.rename(columns={"date": "month"}, inplace=True)
 
         monthly["roi"] = (
             monthly["revenue"] / monthly["spend"].replace(0, np.nan)
@@ -162,10 +176,10 @@ def forecast():
         })
 
     except Exception as e:
-        print("FORECAST ERROR:", str(e))
+        print("FORECAST ERROR:", repr(e))
         return jsonify({
             "status": "error",
-            "message": str(e)
+            "message": repr(e)
         }), 500
 
 
