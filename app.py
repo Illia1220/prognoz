@@ -9,7 +9,6 @@ import json
 app = Flask(__name__)
 CORS(app)
 
-
 # -----------------------------
 # METRICS
 # -----------------------------
@@ -27,18 +26,20 @@ def calculate_metrics(df):
     return df
 
 
-
+# -----------------------------
+# CLEAR (FIXED)
+# -----------------------------
 @app.route("/clear", methods=["POST"])
 def clear():
-    supabase.table("ads_data").delete().neq("id", 0).execute()
-    return jsonify({"status": "cleared"})
-
-
-
+    try:
+        supabase.table("ads_data").delete().gte("date", "1900-01-01").execute()
+        return jsonify({"status": "cleared"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # -----------------------------
-# UPLOAD CSV (STABLE VERSION)
+# UPLOAD CSV (REPLACE MODE)
 # -----------------------------
 @app.route("/upload", methods=["POST"])
 def upload_csv():
@@ -64,77 +65,51 @@ def upload_csv():
 
         print("RAW ROWS:", len(df))
 
-        # -----------------------------
-        # CLEAN DATA
-        # -----------------------------
-
         df = df.dropna(how="all")
 
-        # numeric safety
         numeric_cols = ["impressions", "clicks", "spend", "conversions", "revenue"]
 
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-        # date fix (IMPORTANT)
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
         df["date"] = df["date"].dt.strftime("%Y-%m-%d")
 
-        # remove duplicates
         df = df.drop_duplicates()
 
-        # metrics
         df = calculate_metrics(df)
 
-        # final cleanup
         df = df.replace({np.nan: None})
 
-        # 🔥 CRITICAL FIX: make JSON-safe Python objects
         data = json.loads(df.to_json(orient="records"))
 
-        print("UPLOAD ROWS:", len(data))
-        print("SAMPLE:", data[0])
+        # 🔥 IMPORTANT FIX: REPLACE MODE (no duplicates ever)
+        supabase.table("ads_data").delete().gte("date", "1900-01-01").execute()
 
-        # -----------------------------
-        # SUPABASE INSERT
-        # -----------------------------
-        try:
-            res = supabase.table("ads_data").insert(data).execute()
+        res = supabase.table("ads_data").insert(data).execute()
 
-            print("SUPABASE RESPONSE:", res)
-
-            if hasattr(res, "error") and res.error:
-                print("SUPABASE ERROR:", res.error)
-                return jsonify({
-                    "status": "error",
-                    "message": str(res.error)
-                }), 500
-
-            return jsonify({
-                "status": "success",
-                "rows_inserted": len(data)
-            })
-
-        except Exception as e:
-            print("SUPABASE INSERT ERROR:", repr(e))
+        if hasattr(res, "error") and res.error:
             return jsonify({
                 "status": "error",
-                "message": repr(e)
+                "message": str(res.error)
             }), 500
 
+        return jsonify({
+            "status": "success",
+            "rows_inserted": len(data)
+        })
 
     except Exception as e:
         print("UPLOAD ERROR:", repr(e))
         return jsonify({
             "status": "error",
-            "message": repr(e)
+            "message": str(e)
         }), 500
 
 
-
 # -----------------------------
-# FORECAST (UPDATED WITH CHART DATA)
+# FORECAST
 # -----------------------------
 @app.route("/forecast", methods=["GET"])
 def forecast():
@@ -153,14 +128,11 @@ def forecast():
 
         df = pd.DataFrame(data)
 
-        # date cleanup
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
 
-        # recalc metrics
         df = calculate_metrics(df)
 
-        # monthly aggregation
         monthly = df.groupby(df["date"].dt.to_period("M")).agg({
             "spend": "sum",
             "revenue": "sum",
@@ -170,7 +142,6 @@ def forecast():
 
         monthly["date"] = monthly["date"].astype(str)
 
-        # ROI
         monthly["roi"] = (
             monthly["revenue"] /
             monthly["spend"].replace(0, np.nan)
@@ -178,7 +149,6 @@ def forecast():
 
         monthly = monthly.replace([np.inf, -np.inf], 0)
 
-        # trend
         if len(monthly) > 1:
             roi_trend = (
                 monthly["roi"].iloc[-1] -
@@ -187,18 +157,15 @@ def forecast():
         else:
             roi_trend = 0
 
-        # averages
         avg_roi = monthly["roi"].mean()
         next_month_roi = avg_roi + roi_trend
         avg_spend = monthly["spend"].mean()
 
-        # spend recommendation
         if next_month_roi <= 0:
             recommended_spend = avg_spend
         else:
             recommended_spend = avg_spend * (avg_roi / next_month_roi)
 
-        # next month for chart
         last_month = pd.Period(monthly["date"].iloc[-1], freq="M")
         next_month = str(last_month + 1)
 
@@ -216,10 +183,9 @@ def forecast():
         })
 
     except Exception as e:
-        print("FORECAST ERROR:", repr(e))
         return jsonify({
             "status": "error",
-            "message": repr(e)
+            "message": str(e)
         }), 500
 
 
