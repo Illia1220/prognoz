@@ -80,27 +80,34 @@ def upload_csv():
         # -----------------------------
         # INSERT WITH DEBUG
         # -----------------------------
-        res = supabase.table("ads_data").insert(data).execute()
+        data = df.to_dict(orient="records")
 
-        # debug Supabase response
-        if hasattr(res, "error") and res.error:
-            print("SUPABASE ERROR:", res.error)
+        print("UPLOAD ROWS:", len(data))
+        print("SAMPLE:", data[0])
+
+        try:
+            res = supabase.table("ads_data").insert(data).execute()
+
+            print("RESPONSE:", res)
+
+            if hasattr(res, "error") and res.error:
+                print("SUPABASE ERROR:", res.error)
+                return jsonify({
+                    "status": "error",
+                    "message": str(res.error)
+                }), 500
+
+            return jsonify({
+                "status": "success",
+                "rows_inserted": len(data)
+            })
+
+        except Exception as e:
+            print("FATAL ERROR:", str(e))
             return jsonify({
                 "status": "error",
-                "message": str(res.error)
+                "message": str(e)
             }), 500
-
-        return jsonify({
-            "status": "success",
-            "rows_inserted": len(data)
-        })
-
-    except Exception as e:
-        print("UPLOAD FAILED:", str(e))
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
 
 
 # -----------------------------
@@ -122,7 +129,7 @@ def forecast():
 
         df = pd.DataFrame(data)
 
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
         df = df.dropna(subset=["date"])
 
         df = calculate_metrics(df)
