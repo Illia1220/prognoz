@@ -159,12 +159,42 @@ def forecast():
 
         avg_roi = monthly["roi"].mean()
         next_month_roi = avg_roi + roi_trend
-        avg_spend = monthly["spend"].mean()
 
-        if next_month_roi <= 0:
-            recommended_spend = avg_spend
-        else:
-            recommended_spend = avg_spend * (avg_roi / next_month_roi)
+        last_spend = monthly["spend"].iloc[-1]
+
+        # базовый коэффициент ROI
+        roi_factor = 1
+
+        if next_month_roi > avg_roi:
+            roi_factor = 1.15
+        elif next_month_roi < avg_roi:
+            roi_factor = 0.90
+
+        # CTR фактор
+        ctr_factor = 1
+
+        if "clicks" in monthly.columns and "impressions" in monthly.columns:
+            monthly["ctr"] = monthly["clicks"] / monthly["impressions"].replace(0, np.nan)
+            last_ctr = monthly["ctr"].iloc[-1]
+            avg_ctr = monthly["ctr"].mean()
+
+            if last_ctr > avg_ctr:
+                ctr_factor = 1.05
+            else:
+                ctr_factor = 0.95
+
+        # итог
+        recommended_spend = last_spend * roi_factor * ctr_factor
+
+        # safety limits
+        max_up = last_spend * 1.20
+        max_down = last_spend * 0.70
+
+        recommended_spend = min(recommended_spend, max_up)
+        recommended_spend = max(recommended_spend, max_down)
+
+
+
 
         last_month = pd.Period(monthly["date"].iloc[-1], freq="M")
         next_month = str(last_month + 1)
