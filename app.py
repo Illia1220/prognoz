@@ -44,70 +44,58 @@ def upload_csv():
         df = pd.read_csv(io.StringIO(content))
 
         # -----------------------------
-        # CLEANING (IMPORTANT FIX)
+        # CLEAN
         # -----------------------------
-
-        # remove empty rows
         df = df.dropna(how="all")
 
-        # convert NaN → None (Supabase requirement)
         df = df.replace({np.nan: None})
 
-        # numeric safety
         numeric_cols = ["impressions", "clicks", "spend", "conversions", "revenue"]
 
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-        # date fix
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        # DATE FIX (IMPORTANT)
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
 
-        # remove duplicates inside file
+        df["date"] = df["date"].dt.date
+
         df = df.drop_duplicates()
 
-        # calculate metrics
         df = calculate_metrics(df)
 
-        # final cleanup (VERY IMPORTANT)
         df = df.replace({np.nan: None})
 
         data = df.to_dict(orient="records")
 
-        print(f"UPLOAD ROWS: {len(data)}")
-
-        # -----------------------------
-        # INSERT WITH DEBUG
-        # -----------------------------
-        data = df.to_dict(orient="records")
-
         print("UPLOAD ROWS:", len(data))
-        print("SAMPLE:", data[0])
 
-        try:
-            res = supabase.table("ads_data").insert(data).execute()
+        # -----------------------------
+        # SAFE INSERT (NO NESTED TRY)
+        # -----------------------------
+        res = supabase.table("ads_data").insert(data).execute()
 
-            print("RESPONSE:", res)
+        print("SUPABASE RESPONSE:", res)
 
-            if hasattr(res, "error") and res.error:
-                print("SUPABASE ERROR:", res.error)
-                return jsonify({
-                    "status": "error",
-                    "message": str(res.error)
-                }), 500
-
-            return jsonify({
-                "status": "success",
-                "rows_inserted": len(data)
-            })
-
-        except Exception as e:
-            print("FATAL ERROR:", str(e))
+        if hasattr(res, "error") and res.error:
             return jsonify({
                 "status": "error",
-                "message": str(e)
+                "message": str(res.error)
             }), 500
+
+        return jsonify({
+            "status": "success",
+            "rows_inserted": len(data)
+        })
+
+    except Exception as e:
+        print("UPLOAD ERROR:", str(e))
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 
 # -----------------------------
