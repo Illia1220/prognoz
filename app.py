@@ -27,6 +27,16 @@ def calculate_metrics(df):
     return df
 
 
+
+@app.route("/clear", methods=["POST"])
+def clear():
+    supabase.table("ads_data").delete().neq("id", 0).execute()
+    return jsonify({"status": "cleared"})
+
+
+
+
+
 # -----------------------------
 # UPLOAD CSV (STABLE VERSION)
 # -----------------------------
