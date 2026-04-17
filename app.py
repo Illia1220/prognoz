@@ -140,8 +140,7 @@ def forecast():
             "impressions": "sum"
         }).reset_index()
 
-        monthly["date"] = monthly["date"].astype(str)
-
+        monthly["date"] = monthly["date"].dt.strftime("%Y-%m")
         monthly["roi"] = (
             monthly["revenue"] /
             monthly["spend"].replace(0, np.nan)
