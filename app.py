@@ -4,10 +4,10 @@ import pandas as pd
 from db import supabase
 import io
 import numpy as np
-import hashlib
 
 app = Flask(__name__)
 CORS(app)
+
 
 # -----------------------------
 # METRICS
@@ -41,47 +41,54 @@ def upload_csv():
             return jsonify({"error": "Empty file"}), 400
 
         content = file.read().decode("utf-8")
-
-        # 🔥 create upload hash (prevents duplicates)
-        upload_hash = hashlib.md5(content.encode()).hexdigest()
-
-        # optional: check if already uploaded
-        existing = supabase.table("ads_uploads") \
-            .select("*") \
-            .eq("upload_hash", upload_hash) \
-            .execute()
-
-        if existing.data:
-            return jsonify({
-                "status": "skipped",
-                "message": "File already uploaded"
-            })
-
         df = pd.read_csv(io.StringIO(content))
+
+        # -----------------------------
+        # CLEANING (IMPORTANT FIX)
+        # -----------------------------
 
         # remove empty rows
         df = df.dropna(how="all")
 
+        # convert NaN → None (Supabase requirement)
+        df = df.replace({np.nan: None})
+
+        # numeric safety
+        numeric_cols = ["impressions", "clicks", "spend", "conversions", "revenue"]
+
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+        # date fix
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        df = df.dropna(subset=["date"])
+
         # remove duplicates inside file
         df = df.drop_duplicates()
 
-        # ensure required columns exist safety
-        required_cols = ["spend", "clicks", "impressions", "revenue"]
-        for col in required_cols:
-            if col not in df.columns:
-                df[col] = 0
-
+        # calculate metrics
         df = calculate_metrics(df)
 
-        # save upload log
-        supabase.table("ads_uploads").insert({
-            "upload_hash": upload_hash,
-            "filename": file.filename
-        }).execute()
+        # final cleanup (VERY IMPORTANT)
+        df = df.replace({np.nan: None})
 
         data = df.to_dict(orient="records")
 
-        supabase.table("ads_data").insert(data).execute()
+        print(f"UPLOAD ROWS: {len(data)}")
+
+        # -----------------------------
+        # INSERT WITH DEBUG
+        # -----------------------------
+        res = supabase.table("ads_data").insert(data).execute()
+
+        # debug Supabase response
+        if hasattr(res, "error") and res.error:
+            print("SUPABASE ERROR:", res.error)
+            return jsonify({
+                "status": "error",
+                "message": str(res.error)
+            }), 500
 
         return jsonify({
             "status": "success",
@@ -89,6 +96,7 @@ def upload_csv():
         })
 
     except Exception as e:
+        print("UPLOAD FAILED:", str(e))
         return jsonify({
             "status": "error",
             "message": str(e)
@@ -159,6 +167,7 @@ def forecast():
         })
 
     except Exception as e:
+        print("FORECAST ERROR:", str(e))
         return jsonify({
             "status": "error",
             "message": str(e)
