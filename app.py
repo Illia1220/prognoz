@@ -44,6 +44,14 @@ def upload_csv():
         content = file.read().decode("utf-8")
         df = pd.read_csv(io.StringIO(content))
 
+        allowed_cols = [
+            "date","campaign","geo",
+            "impressions","clicks","spend",
+            "conversions","revenue"
+        ]
+
+        df = df[allowed_cols]
+
         print("RAW ROWS:", len(df))
 
         # -----------------------------
