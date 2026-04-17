@@ -122,8 +122,9 @@ def upload_csv():
         }), 500
 
 
+
 # -----------------------------
-# FORECAST (FIXED)
+# FORECAST (UPDATED WITH CHART DATA)
 # -----------------------------
 @app.route("/forecast", methods=["GET"])
 def forecast():
@@ -136,51 +137,72 @@ def forecast():
                 "next_month_roi": 0,
                 "roi_trend": 0,
                 "recommended_spend": 0,
-                "monthly": []
+                "monthly": [],
+                "forecast_point": None
             })
 
         df = pd.DataFrame(data)
 
+        # date cleanup
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
 
+        # recalc metrics
         df = calculate_metrics(df)
 
-        monthly = df.groupby(df["date"].dt.to_period("M").astype(str)).agg({
+        # monthly aggregation
+        monthly = df.groupby(df["date"].dt.to_period("M")).agg({
             "spend": "sum",
             "revenue": "sum",
             "clicks": "sum",
             "impressions": "sum"
         }).reset_index()
 
+        monthly["date"] = monthly["date"].astype(str)
+
+        # ROI
         monthly["roi"] = (
-            monthly["revenue"] / monthly["spend"].replace(0, np.nan)
+            monthly["revenue"] /
+            monthly["spend"].replace(0, np.nan)
         ).fillna(0)
 
         monthly = monthly.replace([np.inf, -np.inf], 0)
 
+        # trend
         if len(monthly) > 1:
             roi_trend = (
-                monthly["roi"].iloc[-1] - monthly["roi"].iloc[0]
+                monthly["roi"].iloc[-1] -
+                monthly["roi"].iloc[0]
             ) / len(monthly)
         else:
             roi_trend = 0
 
+        # averages
         avg_roi = monthly["roi"].mean()
         next_month_roi = avg_roi + roi_trend
-
         avg_spend = monthly["spend"].mean()
 
+        # spend recommendation
         if next_month_roi <= 0:
             recommended_spend = avg_spend
         else:
             recommended_spend = avg_spend * (avg_roi / next_month_roi)
 
+        # next month for chart
+        last_month = pd.Period(monthly["date"].iloc[-1], freq="M")
+        next_month = str(last_month + 1)
+
+        forecast_point = {
+            "date": next_month,
+            "roi": float(next_month_roi)
+        }
+
         return jsonify({
             "monthly": monthly.to_dict(orient="records"),
             "next_month_roi": float(next_month_roi),
             "roi_trend": float(roi_trend),
-            "recommended_spend": float(recommended_spend)
+            "recommended_spend": float(recommended_spend),
+            "forecast_point": forecast_point
         })
 
     except Exception as e:
