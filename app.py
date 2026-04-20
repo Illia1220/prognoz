@@ -206,9 +206,6 @@ def forecast():
         }), 500
 
 
-# -----------------------------
-# EXPORT EXCEL
-# -----------------------------
 @app.route("/export", methods=["GET"])
 def export_excel():
     try:
@@ -224,49 +221,84 @@ def export_excel():
 
         df = calculate_metrics(df)
 
+        # -----------------------------
+        # GLOBAL FORECAST (trend)
+        # -----------------------------
         monthly = df.groupby(df["date"].dt.to_period("M")).agg({
             "spend": "sum",
             "revenue": "sum"
         }).reset_index()
 
-        monthly["date"] = monthly["date"].astype(str)
         monthly["roi"] = (
             monthly["revenue"] /
             monthly["spend"].replace(0, np.nan)
         ).fillna(0)
 
+        if len(monthly) > 1:
+            roi_trend = (
+                monthly["roi"].iloc[-1] - monthly["roi"].iloc[0]
+            ) / len(monthly)
+        else:
+            roi_trend = 0
+
+        global_avg_roi = monthly["roi"].mean()
+
+        # -----------------------------
+        # CAMPAIGN LEVEL FORECAST
+        # -----------------------------
+        campaign_stats = df.groupby("campaign").agg({
+            "spend": "sum",
+            "revenue": "sum"
+        }).reset_index()
+
+        campaign_stats["roi"] = (
+            campaign_stats["revenue"] /
+            campaign_stats["spend"].replace(0, np.nan)
+        ).fillna(0)
+
+        campaign_stats["predicted_roi"] = campaign_stats["roi"] + roi_trend
+
+        # spend scaling logic
+        campaign_stats["predicted_spend"] = (
+            campaign_stats["spend"] *
+            (campaign_stats["predicted_roi"] / (global_avg_roi if global_avg_roi != 0 else 1))
+        )
+
+        campaign_stats = campaign_stats.replace([np.inf, -np.inf], 0)
+
+        # -----------------------------
+        # EXCEL
+        # -----------------------------
         wb = Workbook()
 
-        # Sheet 1
+        # RAW DATA
         ws1 = wb.active
         ws1.title = "Raw Data"
-        ws1.append(list(df.columns))
 
-        for row in df.itertuples(index=False):
+        export_df = df.merge(
+            campaign_stats[["campaign", "predicted_roi", "predicted_spend"]],
+            on="campaign",
+            how="left"
+        )
+
+        ws1.append(list(export_df.columns))
+
+        for row in export_df.itertuples(index=False):
             ws1.append(list(row))
 
-        # Sheet 2
-        ws2 = wb.create_sheet("Forecast")
-        ws2.append(["Month", "ROI"])
+        # -----------------------------
+        # SUMMARY SHEET
+        # -----------------------------
+        ws2 = wb.create_sheet("Campaign Forecast")
+        ws2.append(["Campaign", "ROI", "Predicted ROI", "Predicted Spend"])
 
-        for row in monthly.itertuples(index=False):
-            ws2.append([row.date, float(row.roi)])
-
-        # Chart
-        chart = LineChart()
-        chart.title = "ROI Forecast"
-        chart.y_axis.title = "ROI"
-        chart.x_axis.title = "Month"
-        chart.height = 7
-        chart.width = 14
-
-        data_ref = Reference(ws2, min_col=2, min_row=1, max_row=len(monthly) + 1)
-        cats = Reference(ws2, min_col=1, min_row=2, max_row=len(monthly) + 1)
-
-        chart.add_data(data_ref, titles_from_data=True)
-        chart.set_categories(cats)
-
-        ws2.add_chart(chart, "D2")
+        for row in campaign_stats.itertuples(index=False):
+            ws2.append([
+                row.campaign,
+                float(row.roi),
+                float(row.predicted_roi),
+                float(row.predicted_spend)
+            ])
 
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
         wb.save(tmp.name)
