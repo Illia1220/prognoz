@@ -258,8 +258,8 @@ def export_excel():
 
         campaign_stats["predicted_roi"] = campaign_stats["roi"] + roi_trend
 
-        # spend scaling logic
-        campaign_stats["predicted_spend"] = (
+        # 🔥 FIX: renamed to recommended_spend
+        campaign_stats["recommended_spend"] = (
             campaign_stats["spend"] *
             (campaign_stats["predicted_roi"] / (global_avg_roi if global_avg_roi != 0 else 1))
         )
@@ -276,7 +276,7 @@ def export_excel():
         ws1.title = "Raw Data"
 
         export_df = df.merge(
-            campaign_stats[["campaign", "predicted_roi", "predicted_spend"]],
+            campaign_stats[["campaign", "predicted_roi", "recommended_spend"]],
             on="campaign",
             how="left"
         )
@@ -290,14 +290,14 @@ def export_excel():
         # SUMMARY SHEET
         # -----------------------------
         ws2 = wb.create_sheet("Campaign Forecast")
-        ws2.append(["Campaign", "ROI", "Predicted ROI", "Predicted Spend"])
+        ws2.append(["Campaign", "ROI", "Predicted ROI", "Recommended Spend"])
 
         for row in campaign_stats.itertuples(index=False):
             ws2.append([
                 row.campaign,
                 float(row.roi),
                 float(row.predicted_roi),
-                float(row.predicted_spend)
+                float(row.recommended_spend)
             ])
 
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
