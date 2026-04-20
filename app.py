@@ -206,6 +206,10 @@ def forecast():
         }), 500
 
 
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+
+
 @app.route("/export", methods=["GET"])
 def export_excel():
     try:
@@ -216,13 +220,15 @@ def export_excel():
             return jsonify({"error": "No data"}), 400
 
         df = pd.DataFrame(data)
+
+        # 🔥 FIX DATE
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
 
         df = calculate_metrics(df)
 
         # -----------------------------
-        # GLOBAL FORECAST (trend)
+        # FORECAST
         # -----------------------------
         monthly = df.groupby(df["date"].dt.to_period("M")).agg({
             "spend": "sum",
@@ -234,17 +240,6 @@ def export_excel():
             monthly["spend"].replace(0, np.nan)
         ).fillna(0)
 
-        if len(monthly) > 1:
-            roi_trend = (
-                monthly["roi"].iloc[-1] - monthly["roi"].iloc[0]
-            ) / len(monthly)
-        else:
-            roi_trend = 0
-
-        global_avg_roi = monthly["roi"].mean()
-
-        # -----------------------------
-        # CAMPAIGN LEVEL FORECAST
         # -----------------------------
         campaign_stats = df.groupby("campaign").agg({
             "spend": "sum",
@@ -256,22 +251,48 @@ def export_excel():
             campaign_stats["spend"].replace(0, np.nan)
         ).fillna(0)
 
-        campaign_stats["predicted_roi"] = campaign_stats["roi"] + roi_trend
+        global_avg_roi = campaign_stats["roi"].mean()
 
-        # 🔥 FIX: renamed to recommended_spend
+        campaign_stats["predicted_roi"] = campaign_stats["roi"]
         campaign_stats["recommended_spend"] = (
             campaign_stats["spend"] *
             (campaign_stats["predicted_roi"] / (global_avg_roi if global_avg_roi != 0 else 1))
         )
-
-        campaign_stats = campaign_stats.replace([np.inf, -np.inf], 0)
 
         # -----------------------------
         # EXCEL
         # -----------------------------
         wb = Workbook()
 
-        # RAW DATA
+        header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True, size=12)
+
+        def style_sheet(ws):
+            # freeze header
+            ws.freeze_panes = "A2"
+
+            # header style
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center")
+
+            # auto width
+            for col in ws.columns:
+                max_length = 0
+                col_letter = get_column_letter(col[0].column)
+
+                for cell in col:
+                    try:
+                        value = str(cell.value)
+                        if len(value) > max_length:
+                            max_length = len(value)
+                    except:
+                        pass
+
+                ws.column_dimensions[col_letter].width = max_length + 3
+
+        # ---------------- RAW DATA ----------------
         ws1 = wb.active
         ws1.title = "Raw Data"
 
@@ -281,14 +302,17 @@ def export_excel():
             how="left"
         )
 
+        # 🔥 FIX DATE FORMAT (IMPORTANT)
+        export_df["date"] = pd.to_datetime(export_df["date"]).dt.strftime("%d.%m.%Y %H:%M:%S")
+
         ws1.append(list(export_df.columns))
 
         for row in export_df.itertuples(index=False):
             ws1.append(list(row))
 
-        # -----------------------------
-        # SUMMARY SHEET
-        # -----------------------------
+        style_sheet(ws1)
+
+        # ---------------- SUMMARY ----------------
         ws2 = wb.create_sheet("Campaign Forecast")
         ws2.append(["Campaign", "ROI", "Predicted ROI", "Recommended Spend"])
 
@@ -300,6 +324,9 @@ def export_excel():
                 float(row.recommended_spend)
             ])
 
+        style_sheet(ws2)
+
+        # ---------------- SAVE ----------------
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
         wb.save(tmp.name)
 
