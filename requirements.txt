@@ -4,3 +4,4 @@ pandas
 numpy
 supabase
 gunicorn
+openpyxl

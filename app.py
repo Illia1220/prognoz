@@ -1,10 +1,14 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import pandas as pd
 from db import supabase
 import io
 import numpy as np
 import json
+import tempfile
+
+from openpyxl import Workbook
+from openpyxl.chart import LineChart, Reference
 
 app = Flask(__name__)
 CORS(app)
@@ -27,7 +31,7 @@ def calculate_metrics(df):
 
 
 # -----------------------------
-# CLEAR (FIXED)
+# CLEAR
 # -----------------------------
 @app.route("/clear", methods=["POST"])
 def clear():
@@ -39,7 +43,7 @@ def clear():
 
 
 # -----------------------------
-# UPLOAD CSV (REPLACE MODE)
+# UPLOAD CSV
 # -----------------------------
 @app.route("/upload", methods=["POST"])
 def upload_csv():
@@ -56,18 +60,21 @@ def upload_csv():
         df = pd.read_csv(io.StringIO(content))
 
         allowed_cols = [
-            "date","campaign","geo",
-            "impressions","clicks","spend",
-            "conversions","revenue"
+            "date", "campaign", "geo",
+            "impressions", "clicks", "spend",
+            "conversions", "revenue"
         ]
 
         df = df[allowed_cols]
-
-        print("RAW ROWS:", len(df))
-
         df = df.dropna(how="all")
 
-        numeric_cols = ["impressions", "clicks", "spend", "conversions", "revenue"]
+        numeric_cols = [
+            "impressions",
+            "clicks",
+            "spend",
+            "conversions",
+            "revenue"
+        ]
 
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -77,23 +84,14 @@ def upload_csv():
         df["date"] = df["date"].dt.strftime("%Y-%m-%d")
 
         df = df.drop_duplicates()
-
         df = calculate_metrics(df)
-
         df = df.replace({np.nan: None})
 
         data = json.loads(df.to_json(orient="records"))
 
-        # 🔥 IMPORTANT FIX: REPLACE MODE (no duplicates ever)
+        # replace mode
         supabase.table("ads_data").delete().gte("date", "1900-01-01").execute()
-
-        res = supabase.table("ads_data").insert(data).execute()
-
-        if hasattr(res, "error") and res.error:
-            return jsonify({
-                "status": "error",
-                "message": str(res.error)
-            }), 500
+        supabase.table("ads_data").insert(data).execute()
 
         return jsonify({
             "status": "success",
@@ -101,7 +99,6 @@ def upload_csv():
         })
 
     except Exception as e:
-        print("UPLOAD ERROR:", repr(e))
         return jsonify({
             "status": "error",
             "message": str(e)
@@ -161,39 +158,30 @@ def forecast():
 
         last_spend = monthly["spend"].iloc[-1]
 
-        # базовый коэффициент ROI
         roi_factor = 1
-
         if next_month_roi > avg_roi:
             roi_factor = 1.15
         elif next_month_roi < avg_roi:
             roi_factor = 0.90
 
-        # CTR фактор
         ctr_factor = 1
+        monthly["ctr"] = monthly["clicks"] / monthly["impressions"].replace(0, np.nan)
 
-        if "clicks" in monthly.columns and "impressions" in monthly.columns:
-            monthly["ctr"] = monthly["clicks"] / monthly["impressions"].replace(0, np.nan)
-            last_ctr = monthly["ctr"].iloc[-1]
-            avg_ctr = monthly["ctr"].mean()
+        last_ctr = monthly["ctr"].iloc[-1]
+        avg_ctr = monthly["ctr"].mean()
 
-            if last_ctr > avg_ctr:
-                ctr_factor = 1.05
-            else:
-                ctr_factor = 0.95
+        if last_ctr > avg_ctr:
+            ctr_factor = 1.05
+        else:
+            ctr_factor = 0.95
 
-        # итог
         recommended_spend = last_spend * roi_factor * ctr_factor
 
-        # safety limits
         max_up = last_spend * 1.20
         max_down = last_spend * 0.70
 
         recommended_spend = min(recommended_spend, max_up)
         recommended_spend = max(recommended_spend, max_down)
-
-
-
 
         last_month = pd.Period(monthly["date"].iloc[-1], freq="M")
         next_month = str(last_month + 1)
@@ -216,6 +204,81 @@ def forecast():
             "status": "error",
             "message": str(e)
         }), 500
+
+
+# -----------------------------
+# EXPORT EXCEL
+# -----------------------------
+@app.route("/export", methods=["GET"])
+def export_excel():
+    try:
+        response = supabase.table("ads_data").select("*").execute()
+        data = response.data or []
+
+        if len(data) == 0:
+            return jsonify({"error": "No data"}), 400
+
+        df = pd.DataFrame(data)
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"])
+
+        df = calculate_metrics(df)
+
+        monthly = df.groupby(df["date"].dt.to_period("M")).agg({
+            "spend": "sum",
+            "revenue": "sum"
+        }).reset_index()
+
+        monthly["date"] = monthly["date"].astype(str)
+        monthly["roi"] = (
+            monthly["revenue"] /
+            monthly["spend"].replace(0, np.nan)
+        ).fillna(0)
+
+        wb = Workbook()
+
+        # Sheet 1
+        ws1 = wb.active
+        ws1.title = "Raw Data"
+        ws1.append(list(df.columns))
+
+        for row in df.itertuples(index=False):
+            ws1.append(list(row))
+
+        # Sheet 2
+        ws2 = wb.create_sheet("Forecast")
+        ws2.append(["Month", "ROI"])
+
+        for row in monthly.itertuples(index=False):
+            ws2.append([row.date, float(row.roi)])
+
+        # Chart
+        chart = LineChart()
+        chart.title = "ROI Forecast"
+        chart.y_axis.title = "ROI"
+        chart.x_axis.title = "Month"
+        chart.height = 7
+        chart.width = 14
+
+        data_ref = Reference(ws2, min_col=2, min_row=1, max_row=len(monthly) + 1)
+        cats = Reference(ws2, min_col=1, min_row=2, max_row=len(monthly) + 1)
+
+        chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(cats)
+
+        ws2.add_chart(chart, "D2")
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+        wb.save(tmp.name)
+
+        return send_file(
+            tmp.name,
+            as_attachment=True,
+            download_name="analytics_report.xlsx"
+        )
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # -----------------------------
