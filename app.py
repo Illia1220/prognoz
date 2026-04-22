@@ -116,12 +116,16 @@ def forecast():
 
         if len(data) == 0:
             return jsonify({
-                "next_month_roi": 0,
-                "roi_trend": 0,
-                "recommended_spend": 0,
                 "monthly": [],
+                "metrics": {},
+                "recommended_spend": 0,
                 "forecast_point": None
             })
+
+        # -----------------------------
+        # INIT
+        # -----------------------------
+        metrics = request.args.get("metrics", "roi").split(",")
 
         df = pd.DataFrame(data)
 
@@ -130,71 +134,111 @@ def forecast():
 
         df = calculate_metrics(df)
 
+        # -----------------------------
+        # MONTHLY AGGREGATION
+        # -----------------------------
         monthly = df.groupby(df["date"].dt.to_period("M")).agg({
             "spend": "sum",
             "revenue": "sum",
             "clicks": "sum",
-            "impressions": "sum"
+            "impressions": "sum",
+            "conversions": "sum"
         }).reset_index()
 
         monthly["date"] = monthly["date"].dt.strftime("%Y-%m")
-        monthly["roi"] = (
-            monthly["revenue"] /
-            monthly["spend"].replace(0, np.nan)
-        ).fillna(0)
 
-        monthly = monthly.replace([np.inf, -np.inf], 0)
+        # -----------------------------
+        # METRIC FUNCTIONS
+        # -----------------------------
+        def get_metric_series(metric):
+            if metric == "roi":
+                return (monthly["revenue"] / monthly["spend"].replace(0, np.nan)).fillna(0)
 
-        if len(monthly) > 1:
-            roi_trend = (
-                monthly["roi"].iloc[-1] -
-                monthly["roi"].iloc[0]
-            ) / len(monthly)
-        else:
-            roi_trend = 0
+            if metric == "cpa":
+                return (monthly["spend"] / monthly["conversions"].replace(0, np.nan)).fillna(0)
 
-        avg_roi = monthly["roi"].mean()
-        next_month_roi = avg_roi + roi_trend
+            if metric == "ctr":
+                return (monthly["clicks"] / monthly["impressions"].replace(0, np.nan)).fillna(0)
 
+            return None
+
+        results = {}
+
+        # -----------------------------
+        # MULTI METRIC FORECAST
+        # -----------------------------
+        for metric in metrics:
+            series = get_metric_series(metric)
+
+            if series is None:
+                continue
+
+            monthly[metric] = series
+
+            avg = series.mean()
+
+            if len(series) > 1:
+                trend = (series.iloc[-1] - series.iloc[0]) / len(series)
+            else:
+                trend = 0
+
+            next_value = avg + trend
+
+            results[metric] = {
+                "history": series.fillna(0).tolist(),
+                "avg": float(avg),
+                "trend": float(trend),
+                "next_value": float(next_value)
+            }
+
+        # -----------------------------
+        # RECOMMENDED SPEND LOGIC
+        # -----------------------------
         last_spend = monthly["spend"].iloc[-1]
 
-        roi_factor = 1
-        if next_month_roi > avg_roi:
-            roi_factor = 1.15
-        elif next_month_roi < avg_roi:
-            roi_factor = 0.90
+        factor = 1
 
-        ctr_factor = 1
-        monthly["ctr"] = monthly["clicks"] / monthly["impressions"].replace(0, np.nan)
+        if "roi" in results:
+            if results["roi"]["next_value"] > results["roi"]["avg"]:
+                factor += 0.15
+            else:
+                factor -= 0.10
 
-        last_ctr = monthly["ctr"].iloc[-1]
-        avg_ctr = monthly["ctr"].mean()
+        if "cpa" in results:
+            if results["cpa"]["next_value"] < results["cpa"]["avg"]:
+                factor += 0.10
+            else:
+                factor -= 0.10
 
-        if last_ctr > avg_ctr:
-            ctr_factor = 1.05
-        else:
-            ctr_factor = 0.95
+        if "ctr" in results:
+            if results["ctr"]["next_value"] > results["ctr"]["avg"]:
+                factor += 0.05
+            else:
+                factor -= 0.05
 
-        recommended_spend = last_spend * roi_factor * ctr_factor
+        recommended_spend = last_spend * factor
 
-        max_up = last_spend * 1.20
-        max_down = last_spend * 0.70
+        # clamps
+        recommended_spend = min(recommended_spend, last_spend * 1.20)
+        recommended_spend = max(recommended_spend, last_spend * 0.70)
 
-        recommended_spend = min(recommended_spend, max_up)
-        recommended_spend = max(recommended_spend, max_down)
-
+        # -----------------------------
+        # FORECAST DATE
+        # -----------------------------
         last_month = pd.Period(monthly["date"].iloc[-1], freq="M")
         next_month = str(last_month + 1)
 
         forecast_point = {
             "date": next_month,
-            "roi": float(next_month_roi)
+            **{m: results[m]["next_value"] for m in results}
         }
 
+        # -----------------------------
+        # RESPONSE
+        # -----------------------------
         return jsonify({
-            "monthly": monthly.to_dict(orient="records"),
-            "next_month_roi": float(next_month_roi),
-            "roi_trend": float(roi_trend),
+            "monthly": monthly.replace([np.inf, -np.inf], 0).fillna(0).to_dict(orient="records"),
+            "metrics": results,
             "recommended_spend": float(recommended_spend),
             "forecast_point": forecast_point
         })
