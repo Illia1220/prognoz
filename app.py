@@ -8,7 +8,8 @@ import json
 import tempfile
 
 from openpyxl import Workbook
-from openpyxl.chart import LineChart, Reference
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
 
 app = Flask(__name__)
 CORS(app)
@@ -26,7 +27,6 @@ def safe_div(a, b):
 def calculate_metrics(df):
     df = df.copy()
 
-    # приводим числа
     for col in ["impressions", "clicks", "spend", "conversions", "revenue"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -35,9 +35,7 @@ def calculate_metrics(df):
     df["cpa"] = safe_div(df["spend"], df["conversions"])
     df["roi"] = safe_div(df["revenue"], df["spend"])
 
-    # заменяем только inf, но НЕ убиваем nan заранее
     df = df.replace([np.inf, -np.inf], np.nan)
-
     return df
 
 
@@ -79,16 +77,17 @@ def upload_csv():
         df = df[allowed_cols]
         df = df.dropna(how="all")
 
-        numeric_cols = [
-            "impressions",
-            "clicks",
-            "spend",
-            "conversions",
-            "revenue"
-        ]
+        # -----------------------------
+        # IMPORTANT FIX:
+        # НЕ убиваем impressions/clicks/conversions в 0
+        # -----------------------------
+        numeric_cols = ["impressions", "clicks", "conversions", "revenue"]
 
         for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # spend можно безопасно в 0 (иначе ROI ломается)
+        df["spend"] = pd.to_numeric(df["spend"], errors="coerce").fillna(0)
 
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
@@ -96,11 +95,11 @@ def upload_csv():
 
         df = df.drop_duplicates()
         df = calculate_metrics(df)
+
         df = df.replace({np.nan: None})
 
         data = json.loads(df.to_json(orient="records"))
 
-        # replace mode
         supabase.table("ads_data").delete().gte("date", "1900-01-01").execute()
         supabase.table("ads_data").insert(data).execute()
 
@@ -125,15 +124,13 @@ def forecast():
         response = supabase.table("ads_data").select("*").execute()
         data = response.data or []
 
-        if len(data) == 0:
+        if not data:
             return jsonify({
                 "monthly": [],
                 "metrics": {},
                 "recommended_spend": 0,
                 "forecast_point": None
             })
-
-        metrics = request.args.get("metrics", "roi").split(",")
 
         df = pd.DataFrame(data)
 
@@ -142,8 +139,6 @@ def forecast():
 
         df = calculate_metrics(df)
 
-        # -----------------------------
-        # MONTHLY AGGREGATION
         # -----------------------------
         monthly = df.groupby(df["date"].dt.to_period("M")).agg({
             "spend": "sum",
@@ -156,57 +151,38 @@ def forecast():
         monthly["date"] = monthly["date"].dt.strftime("%Y-%m")
 
         # -----------------------------
-        # SAFE DIVISION (CRITICAL FIX)
-        # -----------------------------
-        def safe_div(a, b):
-            return np.where((b == 0) | (pd.isna(b)), np.nan, a / b)
-
-        # -----------------------------
-        # METRIC SERIES (FIXED)
-        # -----------------------------
-        def get_metric_series(metric):
+        def get_metric(metric):
             if metric == "roi":
                 return safe_div(monthly["revenue"], monthly["spend"])
-
             if metric == "cpa":
                 return safe_div(monthly["spend"], monthly["conversions"])
-
             if metric == "ctr":
                 return safe_div(monthly["clicks"], monthly["impressions"])
-
             return None
 
         results = {}
 
-        # -----------------------------
-        # FORECAST ENGINE
-        # -----------------------------
-        for metric in metrics:
-            series = get_metric_series(metric)
+        metrics = request.args.get("metrics", "roi").split(",")
+
+        for m in metrics:
+            series = get_metric(m)
 
             if series is None:
                 continue
 
-            monthly[metric] = series
+            monthly[m] = series
 
             avg = np.nanmean(series)
-
-            if len(series) > 1:
-                trend = (series[-1] - series[0]) / len(series)
-            else:
-                trend = 0
-
+            trend = (series[-1] - series[0]) / len(series) if len(series) > 1 else 0
             next_value = avg + trend
 
-            results[metric] = {
+            results[m] = {
                 "history": [None if np.isnan(x) else float(x) for x in series],
                 "avg": float(avg) if not np.isnan(avg) else 0,
                 "trend": float(trend),
                 "next_value": float(next_value) if not np.isnan(next_value) else 0
             }
 
-        # -----------------------------
-        # RECOMMENDED SPEND LOGIC
         # -----------------------------
         last_spend = monthly["spend"].iloc[-1]
         factor = 1
@@ -220,13 +196,8 @@ def forecast():
         if "ctr" in results:
             factor += 0.05 if results["ctr"]["next_value"] > results["ctr"]["avg"] else -0.05
 
-        recommended_spend = last_spend * factor
-        recommended_spend = min(recommended_spend, last_spend * 1.20)
-        recommended_spend = max(recommended_spend, last_spend * 0.70)
+        recommended_spend = max(min(last_spend * factor, last_spend * 1.2), last_spend * 0.7)
 
-        # -----------------------------
-        # FORECAST POINT
-        # -----------------------------
         last_month = pd.Period(monthly["date"].iloc[-1], freq="M")
         next_month = str(last_month + 1)
 
@@ -236,17 +207,15 @@ def forecast():
         }
 
         return jsonify({
-            "monthly": monthly.replace([np.inf, -np.inf], np.nan).fillna(0).to_dict(orient="records"),
+            "monthly": monthly.replace([np.inf, -np.inf], np.nan).to_dict(orient="records"),
             "metrics": results,
             "recommended_spend": float(recommended_spend),
             "forecast_point": forecast_point
         })
 
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 
 from openpyxl.styles import Font, PatternFill, Alignment
