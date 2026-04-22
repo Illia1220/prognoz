@@ -14,18 +14,29 @@ app = Flask(__name__)
 CORS(app)
 
 # -----------------------------
+# SAFE DIVISION
+# -----------------------------
+def safe_div(a, b):
+    return np.where((b == 0) | (pd.isna(b)), np.nan, a / b)
+
+
+# -----------------------------
 # METRICS
 # -----------------------------
 def calculate_metrics(df):
-    df = df.fillna(0)
+    df = df.copy()
 
-    df["ctr"] = df["clicks"] / df["impressions"].replace(0, np.nan)
-    df["cpm"] = df["spend"] / df["impressions"].replace(0, np.nan) * 1000
-    df["cpa"] = df["spend"] / df["conversions"].replace(0, np.nan)
-    df["roi"] = df["revenue"] / df["spend"].replace(0, np.nan)
+    # приводим числа
+    for col in ["impressions", "clicks", "spend", "conversions", "revenue"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df = df.replace([np.inf, -np.inf], 0)
-    df = df.fillna(0)
+    df["ctr"] = safe_div(df["clicks"], df["impressions"])
+    df["cpm"] = safe_div(df["spend"], df["impressions"]) * 1000
+    df["cpa"] = safe_div(df["spend"], df["conversions"])
+    df["roi"] = safe_div(df["revenue"], df["spend"])
+
+    # заменяем только inf, но НЕ убиваем nan заранее
+    df = df.replace([np.inf, -np.inf], np.nan)
 
     return df
 
@@ -122,9 +133,6 @@ def forecast():
                 "forecast_point": None
             })
 
-        # -----------------------------
-        # INIT
-        # -----------------------------
         metrics = request.args.get("metrics", "roi").split(",")
 
         df = pd.DataFrame(data)
@@ -148,24 +156,30 @@ def forecast():
         monthly["date"] = monthly["date"].dt.strftime("%Y-%m")
 
         # -----------------------------
-        # METRIC FUNCTIONS
+        # SAFE DIVISION (CRITICAL FIX)
+        # -----------------------------
+        def safe_div(a, b):
+            return np.where((b == 0) | (pd.isna(b)), np.nan, a / b)
+
+        # -----------------------------
+        # METRIC SERIES (FIXED)
         # -----------------------------
         def get_metric_series(metric):
             if metric == "roi":
-                return (monthly["revenue"] / monthly["spend"].replace(0, np.nan)).fillna(0)
+                return safe_div(monthly["revenue"], monthly["spend"])
 
             if metric == "cpa":
-                return (monthly["spend"] / monthly["conversions"].replace(0, np.nan)).fillna(0)
+                return safe_div(monthly["spend"], monthly["conversions"])
 
             if metric == "ctr":
-                return (monthly["clicks"] / monthly["impressions"].replace(0, np.nan)).fillna(0)
+                return safe_div(monthly["clicks"], monthly["impressions"])
 
             return None
 
         results = {}
 
         # -----------------------------
-        # MULTI METRIC FORECAST
+        # FORECAST ENGINE
         # -----------------------------
         for metric in metrics:
             series = get_metric_series(metric)
@@ -175,55 +189,43 @@ def forecast():
 
             monthly[metric] = series
 
-            avg = series.mean()
+            avg = np.nanmean(series)
 
             if len(series) > 1:
-                trend = (series.iloc[-1] - series.iloc[0]) / len(series)
+                trend = (series[-1] - series[0]) / len(series)
             else:
                 trend = 0
 
             next_value = avg + trend
 
             results[metric] = {
-                "history": series.fillna(0).tolist(),
-                "avg": float(avg),
+                "history": [None if np.isnan(x) else float(x) for x in series],
+                "avg": float(avg) if not np.isnan(avg) else 0,
                 "trend": float(trend),
-                "next_value": float(next_value)
+                "next_value": float(next_value) if not np.isnan(next_value) else 0
             }
 
         # -----------------------------
         # RECOMMENDED SPEND LOGIC
         # -----------------------------
         last_spend = monthly["spend"].iloc[-1]
-
         factor = 1
 
         if "roi" in results:
-            if results["roi"]["next_value"] > results["roi"]["avg"]:
-                factor += 0.15
-            else:
-                factor -= 0.10
+            factor += 0.15 if results["roi"]["next_value"] > results["roi"]["avg"] else -0.10
 
         if "cpa" in results:
-            if results["cpa"]["next_value"] < results["cpa"]["avg"]:
-                factor += 0.10
-            else:
-                factor -= 0.10
+            factor += 0.10 if results["cpa"]["next_value"] < results["cpa"]["avg"] else -0.10
 
         if "ctr" in results:
-            if results["ctr"]["next_value"] > results["ctr"]["avg"]:
-                factor += 0.05
-            else:
-                factor -= 0.05
+            factor += 0.05 if results["ctr"]["next_value"] > results["ctr"]["avg"] else -0.05
 
         recommended_spend = last_spend * factor
-
-        # clamps
         recommended_spend = min(recommended_spend, last_spend * 1.20)
         recommended_spend = max(recommended_spend, last_spend * 0.70)
 
         # -----------------------------
-        # FORECAST DATE
+        # FORECAST POINT
         # -----------------------------
         last_month = pd.Period(monthly["date"].iloc[-1], freq="M")
         next_month = str(last_month + 1)
@@ -233,11 +235,8 @@ def forecast():
             **{m: results[m]["next_value"] for m in results}
         }
 
-        # -----------------------------
-        # RESPONSE
-        # -----------------------------
         return jsonify({
-            "monthly": monthly.replace([np.inf, -np.inf], 0).fillna(0).to_dict(orient="records"),
+            "monthly": monthly.replace([np.inf, -np.inf], np.nan).fillna(0).to_dict(orient="records"),
             "metrics": results,
             "recommended_spend": float(recommended_spend),
             "forecast_point": forecast_point
@@ -253,7 +252,7 @@ def forecast():
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-
+# -----------------------------
 @app.route("/export", methods=["GET"])
 def export_excel():
     try:
@@ -265,24 +264,23 @@ def export_excel():
 
         df = pd.DataFrame(data)
 
-        # 🔥 FIX DATE
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
 
         df = calculate_metrics(df)
 
         # -----------------------------
-        # FORECAST
+        # MONTHLY
         # -----------------------------
+        def safe_div(a, b):
+            return np.where((b == 0) | (pd.isna(b)), np.nan, a / b)
+
         monthly = df.groupby(df["date"].dt.to_period("M")).agg({
             "spend": "sum",
             "revenue": "sum"
         }).reset_index()
 
-        monthly["roi"] = (
-            monthly["revenue"] /
-            monthly["spend"].replace(0, np.nan)
-        ).fillna(0)
+        monthly["roi"] = safe_div(monthly["revenue"], monthly["spend"])
 
         # -----------------------------
         campaign_stats = df.groupby("campaign").agg({
@@ -290,17 +288,16 @@ def export_excel():
             "revenue": "sum"
         }).reset_index()
 
-        campaign_stats["roi"] = (
-            campaign_stats["revenue"] /
-            campaign_stats["spend"].replace(0, np.nan)
-        ).fillna(0)
+        campaign_stats["roi"] = safe_div(
+            campaign_stats["revenue"],
+            campaign_stats["spend"]
+        )
 
-        global_avg_roi = campaign_stats["roi"].mean()
+        global_avg_roi = np.nanmean(campaign_stats["roi"])
 
         campaign_stats["predicted_roi"] = campaign_stats["roi"]
-        campaign_stats["recommended_spend"] = (
-            campaign_stats["spend"] *
-            (campaign_stats["predicted_roi"] / (global_avg_roi if global_avg_roi != 0 else 1))
+        campaign_stats["recommended_spend"] = campaign_stats["spend"] * (
+            campaign_stats["predicted_roi"] / (global_avg_roi if global_avg_roi else 1)
         )
 
         # -----------------------------
@@ -312,16 +309,13 @@ def export_excel():
         header_font = Font(color="FFFFFF", bold=True, size=12)
 
         def style_sheet(ws):
-            # freeze header
             ws.freeze_panes = "A2"
 
-            # header style
             for cell in ws[1]:
                 cell.fill = header_fill
                 cell.font = header_font
                 cell.alignment = Alignment(horizontal="center")
 
-            # auto width
             for col in ws.columns:
                 max_length = 0
                 col_letter = get_column_letter(col[0].column)
@@ -329,14 +323,13 @@ def export_excel():
                 for cell in col:
                     try:
                         value = str(cell.value)
-                        if len(value) > max_length:
-                            max_length = len(value)
+                        max_length = max(max_length, len(value))
                     except:
                         pass
 
                 ws.column_dimensions[col_letter].width = max_length + 3
 
-        # ---------------- RAW DATA ----------------
+        # RAW DATA
         ws1 = wb.active
         ws1.title = "Raw Data"
 
@@ -346,7 +339,6 @@ def export_excel():
             how="left"
         )
 
-        # 🔥 FIX DATE FORMAT (IMPORTANT)
         export_df["date"] = pd.to_datetime(export_df["date"]).dt.strftime("%d.%m.%Y %H:%M:%S")
 
         ws1.append(list(export_df.columns))
@@ -356,21 +348,21 @@ def export_excel():
 
         style_sheet(ws1)
 
-        # ---------------- SUMMARY ----------------
+        # SUMMARY
         ws2 = wb.create_sheet("Campaign Forecast")
         ws2.append(["Campaign", "ROI", "Predicted ROI", "Recommended Spend"])
 
         for row in campaign_stats.itertuples(index=False):
             ws2.append([
                 row.campaign,
-                float(row.roi),
-                float(row.predicted_roi),
+                float(row.roi) if not np.isnan(row.roi) else 0,
+                float(row.predicted_roi) if not np.isnan(row.predicted_roi) else 0,
                 float(row.recommended_spend)
             ])
 
         style_sheet(ws2)
 
-        # ---------------- SAVE ----------------
+        # SAVE
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
         wb.save(tmp.name)
 
